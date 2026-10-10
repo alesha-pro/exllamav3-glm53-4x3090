@@ -43,7 +43,7 @@ How I measured:
 
 One request with 233,712 prompt tokens on `mix` returned the code I had hidden at the start of the prompt. It took 185 s, which is 1260 tokens/s of prefill, and VRAM after it was 23,092 to 23,371 MiB of 24,576 per card.
 
-## What I changed in the engine
+## Engine changes
 
 1. **GPU-to-GPU exchange for prefill** (`exllamav3_ext/parallel/p2p_big.cu`, `EXL3_TP_P2P_BIG=1`). The stock all-reduce goes through pinned host RAM and takes 26 to 29 ms per call on a prefill-size tensor (4096 x 4096). On 2.05 bpw about 70% of a prefill pass was this exchange. Now every rank shares a buffer in its own VRAM over CUDA IPC, and the ranks add their partial sums pairwise in 2 rounds (0↔1 and 2↔3, then 0↔2 and 1↔3). A call takes 7 to 10 ms. Prefill at 32K went from 989 to 1520 tokens/s. The stream hash matches on all 4 ranks after every module, and KLD did not change (0.1215 before, 0.1214 after). It costs 256 MiB of VRAM per card at chunk 4096.
 2. **Experts in RAM under tensor parallelism** (`util/xtier.py`, `exllamav3_ext/xtier.cu`). Stock exllamav3 can move experts off the GPU only in layer-split mode. Here every card keeps its most used experts in VRAM and the rest in page-locked RAM that the card reads directly. On a decode step a cold expert is copied into a CLOCK cache in VRAM. One pool per expert size, so mixed quants work.
@@ -117,7 +117,7 @@ Check it with `python glm53/tools/smoke.py http://127.0.0.1:30000`: a chat turn,
 What the server accepts:
 
 - `chat_template_kwargs: {"enable_thinking": false}` turns thinking off.
-- `reasoning_effort` or `chat_template_kwargs.reasoning_effort`: the GLM template knows `low` and `high`. Any other value, and no value at all, means `max`, which thinks 3 to 5 times longer. For agents send `high`.
+- The GLM template knows 2 values of `reasoning_effort`, `low` and `high`, and you can also pass it inside `chat_template_kwargs`. Any other value, and no value at all, means `max`, which thinks 3 to 5 times longer. For agents send `high`.
 - Images as OpenAI `image_url` content. Tools in the OpenAI format.
 - The prompt cache is reused by prefix. A 25,350-token prompt took 19.8 s cold, 0.2 s when repeated and 0.4 s for the next turn of the same chat.
 
@@ -145,23 +145,26 @@ A flat quant above about 2.1 bpw does not fit in 96 GB of VRAM with 256K, MTP an
 
 ## Tools
 
-- `tools/smoke.py`: server check.
-- `tools/chat_sweep.py`: prefill and decode speed through the chat API on coherent text.
-- `tools/kld_eval.py`: KLD against stored BF16 logits, through the engine.
-- `tools/merge_mix.py`: write a mixed quant as one folder and compare every tensor with its source.
-- `tools/deep_ctx.py`, `tools/prefix_test.py`: one request near the context limit, and prefix cache reuse.
-- `tools/qbench.py`: in-process benchmark for A/B work.
-- `tools/p2p_test.py`, `tools/p2p_bulk.py`: latency and throughput of the GPU-to-GPU path.
-- `abliteration/`: how the refusal vector was found and checked.
+| Script | What it does |
+|---|---|
+| `tools/smoke.py` | Checks a running server with a chat turn, an image and a tool call |
+| `tools/chat_sweep.py` | Measures prefill and decode speed through the chat API on coherent text |
+| `tools/kld_eval.py` | Computes KLD against stored BF16 logits through the engine |
+| `tools/merge_mix.py` | Writes a mixed quant as one folder and compares every tensor with its source |
+| `tools/deep_ctx.py`, `tools/prefix_test.py` | Send one request near the context limit and check prefix cache reuse |
+| `tools/qbench.py` | In-process benchmark for A/B work |
+| `tools/p2p_test.py`, `tools/p2p_bulk.py` | Measure latency and throughput of the GPU-to-GPU path |
+
+The `abliteration/` folder has the scripts that found and checked the refusal vector.
 
 ## Known limits
 
 - One rig, one model. I ran tensor parallel on exactly 4 cards.
 - `EXL3_TP_P2P_BIG=1` needs CUDA peer access between consumer cards. On my rig that is a patched open kernel module. Without it use `EXL3_TP_P2P_BIG=0`, and prefill drops to about 961 / 989 tokens/s at 8K / 32K on `fast`.
-- My RAM is 2 channels of DDR4-2400 and my slots are PCIe 3.0. Both make cold experts expensive here: a miss is a 9.4 MB copy over PCIe, about 0.75 ms. A machine with PCIe 4.0 should lose less in `mix` and `quality`. I did not test that.
-- `quality` slows down with depth: 37.5 tokens/s at 32K against 42.7 on an empty context. I did not look for the cause.
+- My RAM is 2 channels of DDR4-2400 and my slots are PCIe 3.0, and both make cold experts expensive here. A miss is a 9.4 MB copy over PCIe that takes about 0.75 ms. A machine with PCIe 4.0 should lose less in `mix` and `quality`, but I did not test that.
+- `quality` slows down with depth. It gives 37.5 tokens/s at 32K against 42.7 on an empty context, and I did not look for the cause.
 - A prompt longer than the context returns HTTP 500, not a clear 400.
 - With tools in the request the answer text streams, but the tool calls arrive in one piece at the end.
 - Expert tiering needs a lot of pinned RAM. At 35% of experts in VRAM the 3.05 bpw quant did not load into my 125 GiB.
 - The longest prompt I tested is one 233,712-token request. I did not measure long agent sessions.
-- With the refusal vector on, one benchmark point did not finish: a decode after 32K random tokens kept generating for 17 minutes and I stopped it. On coherent text of the same depth answers end normally. I did not find the cause.
+- With the refusal vector on, one benchmark point did not finish. A decode after 32K random tokens kept generating for 17 minutes and I stopped it. On coherent text of the same depth answers end normally. I did not find the cause.

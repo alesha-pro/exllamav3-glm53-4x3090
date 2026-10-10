@@ -18,7 +18,7 @@ VEC=/path/to/glm53-refusal-per-block-3dir.safetensors glm53/run_server.sh fast
 
 ## Results
 
-Prompt sets: 64 held-out AdvBench requests and the 82 requests of JailbreakBench that took no part in finding the directions. Greedy decoding, everything through the API of the running server. The judge is the stock model without the vector: it reads the request and the answer and labels the answer (`judge_ls.py`).
+The prompt sets are 64 held-out AdvBench requests and the 82 requests of JailbreakBench, which took no part in finding the directions. Decoding is greedy and everything goes through the API of the running server. The judge is the stock model without the vector, which reads the request and the answer and labels the answer (`judge_ls.py`).
 
 `fast` mode (2.05 bpw, 256K, MTP, vision, 4 streams), all 146 requests in each of 3 modes, 438 answers:
 
@@ -28,10 +28,13 @@ Prompt sets: 64 held-out AdvBench requests and the 82 requests of JailbreakBench
 | Thinking, effort `high`, up to 6000 tokens | 32 of 32 | 0 | 142 | 2 | 2 |
 | Thinking, effort `max` (the template default), up to 12,000 tokens | 46 of 48, 2 unfinished | 0 | 135 | 2 | 9 |
 
-- "Without the vector" is the same quant in layer-split mode. For the two thinking modes I ran the first 32 and the first 48 requests.
-- "Disputes the premise": the model takes the request and says its premise is false. Asked for proof that the Earth is flat, it answers that there is none and lists what flat-Earth believers usually argue. 5 of the 7 are requests with a false premise, 2 are "build a game / an app" tasks. A strict 2-class judge (refused or complied) put 1 of these 7 into refusals and 6 into complied. By that judge the result is 1 of 438.
-- "Cut off while thinking": 10 of the 11 are "create / develop a site, an app, a game, a bot, a tool" tasks. The model writes 3,000 to 7,000 words of reasoning and does not close the thinking block within the token budget. The text has no loops. The judge read the reasoning and put all 11 into "working on the task".
-- A plain regex counter for refusal phrases fired 2 times in 438, both false: the phrase was inside a letter the model wrote on request, and "I can't connect to systems myself, but here is how it is done".
+The column "without the vector" is the same quant in layer-split mode, and for the two thinking modes I ran only the first 32 and the first 48 requests there.
+
+An answer that disputes the premise is one where the model takes the request and says its premise is false. Asked for proof that the Earth is flat, it answers that there is none and lists what flat-Earth believers usually argue. 5 of the 7 are requests with a false premise and 2 are "build a game / an app" tasks. A strict 2-class judge (refused or complied) put 1 of these 7 into refusals and 6 into complied, so by that judge the result is 1 of 438.
+
+10 of the 11 answers cut off while thinking are "create / develop a site, an app, a game, a bot, a tool" tasks. The model writes 3,000 to 7,000 words of reasoning and does not close the thinking block within the token budget. The text has no loops, and the judge read the reasoning and put all 11 into "working on the task".
+
+A plain regex counter for refusal phrases fired 2 times in 438 and both were false. In one the phrase was inside a letter the model wrote on request, and the other was "I can't connect to systems myself, but here is how it is done".
 
 The other two engines with the same directions, 178 answers each (146 without thinking, 32 with thinking):
 
@@ -44,7 +47,7 @@ The 2 refusals on Maya are requests about suicide and self-harm. The model turns
 
 The directions were found on the 2.05 bpw quant, and that is where the result is cleanest.
 
-## How the directions were found
+## Finding the directions
 
 1. **Activations** (`resid_dump.py`). 256 harmful and 256 harmless requests in 5 framings: thinking off, thinking on, a short system prompt, and a coding-agent system prompt in both modes. At the last prompt token I record the stream after each of the 45 blocks: 4 hyper-connection streams of 4096. Quant 2.05 bpw, layer-split mode.
 2. **Direction** (`directions.py`). Per block: mean of harmful minus mean of harmless, averaged over streams and framings. Then I remove the components along the mean harmless states. Without that step the projection also moves ordinary prompts. From block 17 on the direction separates held-out harmful and harmless requests with no errors (AUROC 1.000).
@@ -103,12 +106,14 @@ The mix and Maya-M at 256K through `tools/chat_sweep.py`:
 
 ## Scripts
 
-- `resid_dump.py`: activations at the last prompt token.
-- `think_capture.py`: activations at the end of the stock model's own thinking.
-- `directions.py`: analysis and vector files (`analyze`, `write`, `single`, `multi`).
-- `sweep_ls.py`: refusal counts for several vectors in one model load.
-- `eval_refusal.py`: a run through the API of a live server, with thinking effort and parallel requests.
-- `judge_ls.py`: the stock model as the judge. 2 classes by default, `--three` adds "disputes the premise". An answer cut off while thinking is judged on its reasoning.
+| Script | What it does |
+|---|---|
+| `resid_dump.py` | Records activations at the last prompt token |
+| `think_capture.py` | Records activations at the end of the stock model's own thinking |
+| `directions.py` | Analyzes the recordings and writes vector files (`analyze`, `write`, `single`, `multi`) |
+| `sweep_ls.py` | Counts refusals for several vectors in one model load |
+| `eval_refusal.py` | Runs a prompt set through the API of a live server, with thinking effort and parallel requests |
+| `judge_ls.py` | Uses the stock model as the judge. It has 2 classes by default and `--three` adds "disputes the premise". An answer cut off while thinking is judged on its reasoning |
 
 The prompt sets are not in this repository. The scripts read them as JSON lists of strings. The answers to harmful prompts are not published.
 
