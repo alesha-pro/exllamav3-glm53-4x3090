@@ -81,8 +81,8 @@ By size the mix is about 2.37 bpw if you interpolate between turboderp's 2.05 an
 ## Build
 
 ```bash
-git clone -b glm53-4x3090 https://github.com/alesha-pro/exllamav3
-cd exllamav3
+git clone -b glm53-4x3090 https://github.com/alesha-pro/exllamav3-glm53-4x3090
+cd exllamav3-glm53-4x3090
 glm53/setup_env.sh
 ```
 
