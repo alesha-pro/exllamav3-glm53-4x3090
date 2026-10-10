@@ -1,3 +1,5 @@
+> **This is a fork.** Branch `glm53-4x3090` is [turboderp-org/exllamav3](https://github.com/turboderp-org/exllamav3) 1.6.0 (commit `151539c`) plus changes for GLM-5.3-Flash on 4x RTX 3090: GPU-to-GPU exchange for prefill, experts in RAM under tensor parallelism, mixed quants and a refusal vector applied at run time. Everything about the fork is in [glm53/README.md](glm53/README.md). The text below is the upstream README, unchanged. For anything else use upstream.
+
 
 <p align="center">
   <img src="doc/logo.png" width="640" alt="Llama 3.1 8B Instruct quantization benchmark across bits per weight">
