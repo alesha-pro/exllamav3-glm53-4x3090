@@ -53,6 +53,9 @@
 #include "parallel/barrier.cuh"
 #include "parallel/gather.cuh"
 #include "parallel/all_reduce.cuh"
+#include "parallel/p2p.cuh"
+#include "parallel/p2p_big.cuh"
+#include "xtier.cuh"
 
 #include "libtorch/gated_delta_net.h"
 #include "libtorch/attention.h"
@@ -154,6 +157,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("pg_gather_small", &pg_gather_small, "pg_gather_small");
     m.def("pg_all_reduce", &pg_all_reduce, "pg_all_reduce");
     m.def("pg_all_reduce_cpu", &pg_all_reduce_cpu, "pg_all_reduce_cpu");
+    m.def("xt_step", &xt_step, "xt_step");
+    m.def("xt_copy", &xt_copy, "xt_copy");
+    m.def("pg_all_reduce_p2p", &pg_all_reduce_p2p, "pg_all_reduce_p2p");
+    m.def("pg_p2p_fits", &pg_p2p_fits, "pg_p2p_fits");
+    m.def("pg_p2p_create", [](int device, int ndev) {
+        std::string h;
+        uintptr_t p = pg_p2p_create(device, ndev, h);
+        return py::make_tuple(p, py::bytes(h));
+    }, "pg_p2p_create");
+    m.def("pg_p2p_open", [](int device, py::bytes handle) {
+        return pg_p2p_open(device, (std::string) handle);
+    }, "pg_p2p_open");
+    m.def("pg_all_reduce_p2p_big", &pg_all_reduce_p2p_big, "pg_all_reduce_p2p_big");
+    m.def("pg_p2pb_fits", &pg_p2pb_fits, "pg_p2pb_fits");
+    m.def("pg_broadcast_p2p_big", &pg_broadcast_p2p_big, "pg_broadcast_p2p_big");
+    m.def("pg_p2pb_bcast_fits", &pg_p2pb_bcast_fits, "pg_p2pb_bcast_fits");
+    m.def("pg_p2pb_create", [](int device, size_t slot_bytes, int rounds, size_t bcast_bytes) {
+        std::string h;
+        uintptr_t p = pg_p2pb_create(device, slot_bytes, rounds, bcast_bytes, h);
+        return py::make_tuple(p, py::bytes(h));
+    }, "pg_p2pb_create");
     m.def("run_cpu_reduce_jobs", &run_cpu_reduce_jobs, "run_cpu_reduce_jobs");
     m.def("end_cpu_reduce_jobs", &end_cpu_reduce_jobs, "end_cpu_reduce_jobs");
 

@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ..util import gtrace, xtier, rtrace
 from typing_extensions import override
 import os
 import torch
@@ -129,6 +130,12 @@ class MoETPAllocation(TPAllocation):
 
 
 class BlockSparseMLP(BlockSparseMLP_CPU, Module):
+
+    # Expert tiering (util/xtier.py): local indices of this layer's cold experts when a device-side
+    # cache serves them, and the cache's handle
+    _xtier_cold = None
+    _xt = None
+    _gu_trellis_ptr = None
 
     def __init__(
         self,
@@ -661,6 +668,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
             else:
                 g_trellis_ptr, g_suh_ptr, g_svh_ptr = u_trellis_ptr, u_suh_ptr, u_svh_ptr
             gu_trellis_ptr = torch.stack((g_trellis_ptr, u_trellis_ptr), dim = 0).T.contiguous().to(self.device)
+            self._gu_trellis_ptr = gu_trellis_ptr   # live (gate, up) table of the bound class (expert tiering)
             gu_suh_ptr = torch.stack((g_suh_ptr, u_suh_ptr), dim = 0).T.contiguous().to(self.device)
             gu_svh_ptr = torch.stack((g_svh_ptr, u_svh_ptr), dim = 0).T.contiguous().to(self.device)
 
@@ -1038,6 +1046,8 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
 
         if self.routing_gate is not None:
             selected_experts, routing_weights = self.routing_fn(bsz, self.routing_cfg, z, params)
+            if rtrace.ACTIVE:
+                rtrace.rec(self, bsz, self.routing_cfg, z.device)
         elif bsz == 1:
             # Stable broadcast targets rather than per-call allocations
             if self.bcast_sel_bsz1 is None:
@@ -1048,6 +1058,8 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         else:
             selected_experts = torch.empty((bsz, self.num_experts_per_tok), dtype = torch.long, device = self.device)
             routing_weights = torch.empty((bsz, self.num_experts_per_tok), dtype = torch.half, device = self.device)
+
+        if gtrace.ENABLED: gtrace.mark("moe.route")
 
         # Extra norm (Gemma4)
         if self.routed_pre_norm:
@@ -1257,6 +1269,8 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                         count_lo, count_hi, m_tile
                     )
 
+                if gtrace.ENABLED: gtrace.mark("moe.x.plan")
+
                 # num_active -1 = unknown (all fused), kernel launches at max concurrency
                 if self.fused_mode_buffers is not None:
                     if expert_count_list is None:
@@ -1277,17 +1291,21 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                         else:
                             run_fused(len(counts))
 
+                if gtrace.ENABLED: gtrace.mark("moe.x.fused")
+
                 # Batched reconstruct tier (into slots when deterministic, else accumulating)
                 batched = ()
                 if groups:
                     batched = self._run_batch_recon(
                         recon, y, fhs_ext, token_sorted, weight_sorted, expert_count_list, groups,
                         scratch, tables)
+                    if gtrace.ENABLED: gtrace.mark("moe.x.brecon")
 
                 # One fixed-order gather over every slot
                 if scratch is not None:
                     ext.exl3_moe_gather(final_hidden_states, scratch, flat_expert_local, inv_order,
                                         tables[1, :num_ex], tables[0, :num_ex], tables[2, :num_ex], weight_sorted)
+                    if gtrace.ENABLED: gtrace.mark("moe.x.gather")
 
                 out_state = None
                 interm = None
@@ -1381,9 +1399,13 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # quantized paths apply), so this is the last tier
         else:
             assert bszn_eligible
+            if self._xtier_cold is not None:
+                xtier.pool_step(self, selected_experts)
             self.bc.run_bszN(y, selected_experts, routing_weights)
             final_hidden_states = self.experts_cfg.out_bszn[:bsz].view(eshape)
             bc_sh_exp = self.bc_sh_exp
+
+        if gtrace.ENABLED: gtrace.mark("moe.experts")
 
         # Independent shared-expert work can cover the CPU job (split tail or whole layer)
         # before collect enqueues its stream wait. Fused shared experts have already run
@@ -1396,6 +1418,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # CPU tail partial folds in before the post norms (nonlinear: they must see the
         # complete routed sum)
         final_hidden_states = self.cpu_split_combine(final_hidden_states, cpu_partial, cpu_pending, eshape)
+        if gtrace.ENABLED and cpu_pending is not None: gtrace.mark("moe.cpu_combine")
 
         # Latent MoE: project the routed sum back to the residual width (linear, so under TP
         # each rank's partial sum projects on its own ahead of the reduction)
@@ -1439,6 +1462,8 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
             else:
                 final_hidden_states += y
 
+        if gtrace.ENABLED: gtrace.mark("moe.shared")
+
         # Output reduction
         if self.tp_reduce and not pre_norm_reduce:
             self.tp_collect(
@@ -1446,6 +1471,7 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
                 final_hidden_states,
                 (self.intermediate_size > 0 and self.num_local_experts > 0) or bool(self.shared_experts)
             )
+            if gtrace.ENABLED: gtrace.mark("moe.collect")
 
         if out_dtype is not None:
             final_hidden_states = final_hidden_states.to(out_dtype)
@@ -1518,9 +1544,12 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         storage = 0
         if self.shared_gate:
             storage += self.shared_gate.storage_size()
-        for g in self.gates: storage += g.storage_size()
-        for u in self.ups: storage += u.storage_size()
-        for d in self.downs: storage += d.storage_size()
+        storage_x = 0
+        for g in self.gates: storage_x += g.storage_size()
+        for u in self.ups: storage_x += u.storage_size()
+        for d in self.downs: storage_x += d.storage_size()
+        # Expert tiering: only the resident share of the experts counts against VRAM
+        storage += int(storage_x * xtier.hot_fraction(self.key))
         # The latent projections are replicated on every rank, and so is the routing gate (with
         # its transposed and int8 copies, see block_sparse_mlp_routing._gate_t)
         storage_d = 3 * self.routing_gate.storage_size()
@@ -1663,9 +1692,30 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         # Expert parallel
         elif unit == "experts":
             num_local_experts = last - first
-            gates = [_import_i("gates", i) for i in range(first, last)] if gated else []
-            ups = [_import_i("ups", i) for i in range(first, last)]
-            downs = [_import_i("downs", i) for i in range(first, last)]
+            # Expert tiering (util/xtier.py): this rank's cold experts of the layer share one pinned
+            # host arena; their Linear imports route the trellis there instead of to VRAM
+            cold = xtier.cold_set(plan, key)
+            xt_arena = None
+            if cold:
+                nb = 0
+                for name in (("gates",) if gated else ()) + ("ups", "downs"):
+                    for i in cold:
+                        nb += (xtier.desc_nbytes(exported[name][i]["inner"]["trellis"]) + 255) // 256 * 256
+                xt_arena = xtier.Arena(nb, f"Cold experts of {key}", torch.device(device).index if not isinstance(device, int) else device)
+                xtier.SUMMARY["cold_experts"] += len(cold)
+
+            def _import_x(name, i):
+                if i not in cold:
+                    return _import_i(name, i)
+                local_context["xtier_arena"] = xt_arena
+                try:
+                    return _import_i(name, i)
+                finally:
+                    local_context.pop("xtier_arena", None)
+
+            gates = [_import_x("gates", i) for i in range(first, last)] if gated else []
+            ups = [_import_x("ups", i) for i in range(first, last)]
+            downs = [_import_x("downs", i) for i in range(first, last)]
             routing_first = first
             routing_last = last
 
@@ -1703,9 +1753,23 @@ class BlockSparseMLP(BlockSparseMLP_CPU, Module):
         )
 
         module.device = device
+        if unit == "experts" and xt_arena is not None:
+            module._xtier_arena = xt_arena
+            if xtier.SLOTS > 0:
+                xtier.register(module, sorted(i - first for i in cold))
         module.e_score_correction_bias = consumer.recv(exported["e_score_correction_bias"], cuda = True)
         if exported.get("e_score_bias_vl") is not None:
             module.e_score_bias_vl = consumer.recv(exported["e_score_bias_vl"], cuda = True)
+        if xtier.MASK and xtier.enabled():
+            # Every rank routes for itself, so every rank masks the cold experts of all ranks
+            masked = xtier.cold_set_all(local_context["plan"], key)
+            if masked:
+                esb = module.e_score_correction_bias
+                assert esb is not None, "EXL3_XTIER_MASK needs a router with a selection bias"
+                esb = esb.float().clone()
+                esb[torch.tensor(sorted(masked), dtype = torch.long, device = esb.device)] = xtier.MASK_VALUE
+                module.e_score_correction_bias = esb
+                xtier.SUMMARY["masked"] = xtier.SUMMARY.get("masked", 0) + len(masked)
         module.per_expert_scale = consumer.recv(exported["per_expert_scale"], cuda = True)
         if exported.get("tid2eid") is not None and (replicate or device == output_device):
             module.tid2eid = consumer.recv(exported["tid2eid"], cuda = True)

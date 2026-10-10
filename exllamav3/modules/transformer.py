@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ..util import gtrace
 from typing_extensions import override
 import torch
 from ..util.tensor import to2
@@ -159,17 +160,20 @@ class TransformerBlock(Module):
                 y = y.half()
                 if self.attn_norm and not normed:
                     y = self.attn_norm.forward(y, params, out_dtype = torch.half)
+                if gtrace.ENABLED: gtrace.mark("hc_mix(attn)")
             elif self.attn_norm:
                 y = self.attn_norm.forward(x, params, out_dtype = torch.half)
             else:
                 y = x.half()
             y = self.attn.forward(y, params)
+            if gtrace.ENABLED: gtrace.mark("attn:" + type(self.attn).__name__)
             if params.get("prefill") and not export_state:
                 return x
             if self.attn_resid_scalar is not None:
                 y *= self.attn_resid_scalar
             if self.attn_hc:
                 x = self.attn_hc.apply_(x, y, hc_post, hc_comb, params)
+                if gtrace.ENABLED: gtrace.mark("hc_apply(attn)")
             elif self.attn_post_norm:
                 self.attn_post_norm.forward(y, params, residual = x)
             elif self.mlp is not None and self.mlp_norm is not None and self.mlp_norm.can_fuse_residual(x, y):
@@ -183,6 +187,7 @@ class TransformerBlock(Module):
                 y = y.half()
                 if self.mlp_norm and not normed:
                     y = self.mlp_norm.forward(y, params, out_dtype = torch.half)
+                if gtrace.ENABLED: gtrace.mark("hc_mix(mlp)")
             else:
                 params["residual"] = x
                 if y_resid is not None:
@@ -192,10 +197,12 @@ class TransformerBlock(Module):
                 else:
                     y = x.half()
             y = self.mlp.forward(y, params)
+            if gtrace.ENABLED: gtrace.mark("mlp:" + type(self.mlp).__name__)
             if self.mlp_resid_scalar is not None:
                 y *= self.mlp_resid_scalar
             if self.mlp_hc:
                 x = self.mlp_hc.apply_(x, y, hc_post, hc_comb, params)
+                if gtrace.ENABLED: gtrace.mark("hc_apply(mlp)")
             elif self.mlp_post_norm:
                 self.mlp_post_norm.forward(y, params, residual = x)
             else:

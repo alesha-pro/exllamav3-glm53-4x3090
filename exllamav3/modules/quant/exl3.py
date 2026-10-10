@@ -309,10 +309,18 @@ class LinearEXL3:
         else:
             split_out, first, last = True, 0, exported["out_features"]
 
+        # Expert tiering (util/xtier.py): a cold expert's trellis goes to the layer's pinned host
+        # arena and the module computes from a zero-copy device alias
+        xt_arena = local_context.get("xtier_arena") if split is None else None
+        pinned_store = None
+
         if split_out:
             suh = consumer.recv(id_suh, cuda = True)
             svh = consumer.recv(id_svh, cuda = True, slice_dim = 0, first = first, last = last)
-            trellis = consumer.recv(id_trellis, cuda = True, slice_dim = 1, first = first // 16, last = last // 16)
+            if xt_arena is not None:
+                trellis, pinned_store = xt_arena.put(consumer.recv(id_trellis, cuda = False))
+            else:
+                trellis = consumer.recv(id_trellis, cuda = True, slice_dim = 1, first = first // 16, last = last // 16)
             bias = consumer.recv(id_bias, cuda = True, slice_dim = 0, first = first, last = last)
             in_features = exported["in_features"]
             out_features = last - first
@@ -339,6 +347,8 @@ class LinearEXL3:
             bias = bias,
             out_dtype = exported["out_dtype"],
         )
+        if pinned_store is not None:
+            module._pinned_store = pinned_store
         return module
 
 

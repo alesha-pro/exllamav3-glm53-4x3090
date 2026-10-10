@@ -424,6 +424,13 @@ class SafetensorsCollection:
         self.tensor_files = []
         self.add_tensor_files(directory)
 
+        # Mixed quant: take the tensors whose key matches EXL3_MIX_RE from a second model directory
+        # (e.g. expert down projections from a 3 bpw quant over a 2 bpw base). Nothing is copied on disk
+        mix_dir = os.environ.get("EXL3_MIX_DIR")
+        if mix_dir:
+            mix_re = os.environ.get("EXL3_MIX_RE", r"\.mlp\.experts\.\d+\.down_proj\.")
+            self.add_tensor_files(mix_dir, warn_if_override = False, only = re.compile(mix_re))
+
         self.new_tensors = None
         self.deferred_mode = False
         self._reset_deferred()
@@ -442,7 +449,8 @@ class SafetensorsCollection:
     def add_tensor_files(
         self,
         directory: str,
-        warn_if_override: bool = True
+        warn_if_override: bool = True,
+        only = None
     ):
         # accepts either a directory to scan or a single .safetensors file (e.g. a quantized
         # n-gram table added to a conversion job's collection)
@@ -454,6 +462,7 @@ class SafetensorsCollection:
         self.tensor_files += new_tensor_files
 
         overrides = 0
+        mixed = 0
         for st_file in new_tensor_files:
             self.handles[st_file] = None
             header = read_header(st_file, self.tensor_name_fixes)
@@ -464,12 +473,18 @@ class SafetensorsCollection:
                 for k, v in self.tensor_name_fixes.items():
                     if key.endswith(k):
                         key = key[:-len(k)] + v
+                if only is not None:
+                    if not only.search(key) or key not in self.tensor_file_map:
+                        continue
+                    mixed += 1
                 if key in self.tensor_file_map and warn_if_override:
                     print(f" !! Overriding {key} from {self.tensor_file_map[key]} with {st_file}")
                     overrides += 1
                 self.tensor_file_map[key] = st_file
         if overrides:
             print(f" !! Replaced {overrides} tensors from {directory}")
+        if only is not None:
+            print(f" -- Mixed quant: {mixed} tensors taken from {directory}")
 
 
     def has_tensor(

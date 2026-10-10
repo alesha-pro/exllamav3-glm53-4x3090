@@ -47,7 +47,14 @@ def _esb_h(cfg):
     below the inter-expert score gaps even when the bias values are large (GLM-5.2 ~34.0)."""
     if cfg.e_score_bias_h is None and cfg.e_score_correction_bias is not None:
         esb = cfg.e_score_correction_bias
-        cfg.e_score_bias_h = esb if esb.dtype == torch.half else (esb - esb.mean()).half()
+        if esb.dtype == torch.half:
+            cfg.e_score_bias_h = esb
+        else:
+            # Masked experts (expert tiering, EXL3_XTIER_MASK) carry a bias far below the rest: center on
+            # the live ones only, or the shift would cost the live entries their fp16 resolution
+            live = esb > -1000.0
+            mean = esb[live].mean() if bool(live.any()) else esb.mean()
+            cfg.e_score_bias_h = (esb - mean).clamp(min = -30000.0).half()
     return cfg.e_score_bias_h
 
 

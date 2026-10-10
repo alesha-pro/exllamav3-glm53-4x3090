@@ -214,6 +214,7 @@ def save_tensor_image(
 class GTensorCache:
     def __init__(self):
         self.cache = {}
+        self.bcache = {}
 
     def make_key(self, device, shape, dtype, x):
         device = torch.device(device)
@@ -234,7 +235,13 @@ class GTensorCache:
         count): nearby sizes share one kept entry instead of ratcheting a new allocation per
         distinct size, and the total kept per tag is bounded by 2x the largest use."""
         nb = 1 << max(numel - 1, 0).bit_length()
-        return self.get(device, (nb,), dtype, x)[:numel]
+        # Decode-path workspaces are fetched several times per sublayer: look them up by a tuple
+        # key rather than formatting the string key of get() on every call
+        k = (device, nb, dtype, x)
+        v = self.bcache.get(k)
+        if v is None:
+            v = self.bcache[k] = self.get(device, (nb,), dtype, x)
+        return v if v.shape[0] == numel else v[:numel]
 
     # def drop(self, device, shape, dtype, x = ""):
     #     key = self.make_key(device, shape, dtype, x)

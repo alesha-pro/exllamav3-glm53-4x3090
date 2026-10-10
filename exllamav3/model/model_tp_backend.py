@@ -19,6 +19,10 @@ from ..util import log_tp
 GLOBALS_SIZE = 128*1024
 SHBUF_SIZE = 16 * 1024 ** 2
 _nccl_fp32 = os.environ.get("EXL3_TP_NCCL_FP32", "0") != "0"
+# EXL3_TP_P2P=1: decode-size all-reduces (and, with EXL3_TP_P2P_BROADCAST, broadcasts) of the native
+# backend go GPU to GPU through peer-mapped mailboxes instead of through host memory (parallel/p2p.cuh)
+_p2p_broadcast = os.environ.get("EXL3_TP_P2P_BROADCAST", "1") != "0"
+
 # 17 slots (16 devices + accumulator) x 2MB: 8 ring stages of the 256KB reduce chunk size
 SHBUF_SIZE_R = 17 * 8 * 256 * 1024
 SHBUF_SIZE_S = 16 * 1024
@@ -258,6 +262,17 @@ class TPBackendNative:
         self.master = master
         self.cpu = cpu
         self.cpu_is_pinned = False
+        self.p2p = False
+        self.p2p_mine = 0
+        self.p2p_peers = []
+        self.p2pb = False
+        self.p2pb_mine = 0
+        self.p2pb_peers = []
+        self.p2pb_slot = 0
+        self.p2pb_min = 0
+        self.p2pb_rounds = 0
+        self.p2pb_bcast = 0         # bytes of the broadcast inbox (0: broadcasts stay on the host path)
+        self.p2pb_bc_run = 0        # p2p broadcasts since the last all-reduce (at most one: see p2p_big.cuh)
 
         size_g = GLOBALS_SIZE
         size_b = self.shbuf_size
@@ -429,6 +444,38 @@ class TPBackendNative:
 
 
     def broadcast(self, tensor: torch.Tensor, src_device: int):
+        if (
+            self.p2pb and self.p2pb_bcast and self.p2pb_bc_run < 1 and
+            ext.pg_p2pb_bcast_fits(tensor, self.p2pb_bcast, self.p2pb_min)
+        ):
+            self.p2pb_bc_run += 1
+            ext.pg_broadcast_p2p_big(
+                self.ptr_g,
+                self.dev_g,
+                self.active_devices,
+                self.device,
+                src_device,
+                tensor,
+                self.p2pb_mine,
+                self.p2pb_peers,
+                self.p2pb_slot,
+                self.p2pb_bcast,
+                self.abort_flag
+            )
+            return
+        if self.p2p and _p2p_broadcast and ext.pg_p2p_fits(tensor):
+            ext.pg_all_reduce_p2p(
+                self.ptr_g,
+                self.dev_g,
+                self.active_devices,
+                self.device,
+                tensor,
+                self.device == src_device,
+                self.p2p_mine,
+                self.p2p_peers,
+                self.abort_flag
+            )
+            return
         if tensor.numel() * tensor.element_size() <= 2048:
             ext.pg_broadcast_ll(
                 self.ptr_g,
@@ -455,7 +502,77 @@ class TPBackendNative:
             )
 
 
+    def p2p_export(self):
+        """Create this rank's peer-to-peer mailbox and return its IPC handle (see parallel/p2p.cuh)"""
+        ndev = max(self.active_devices) + 1
+        self.p2p_mine, handle = ext.pg_p2p_create(self.device, ndev)
+        return handle
+
+
+    def p2p_import(self, handles: dict):
+        """Map every other rank's mailbox; from here on decode-size collectives go GPU to GPU"""
+        peers = [0] * (max(self.active_devices) + 1)
+        for d, h in handles.items():
+            if d != self.device:
+                peers[d] = ext.pg_p2p_open(self.device, h)
+        self.p2p_peers = peers
+        self.p2p = True
+        log_tp(self.device, f"P2P collectives enabled")
+        return True
+
+
+    def p2pb_export(self, slot_bytes: int, min_bytes: int, bcast_bytes: int):
+        """Create this rank's mailbox for prefill-size reduces and return its IPC handle (parallel/p2p_big.cuh)"""
+        rounds = len(self.active_devices).bit_length() - 1
+        self.p2pb_rounds = rounds
+        self.p2pb_slot = slot_bytes
+        self.p2pb_min = min_bytes
+        self.p2pb_bcast = bcast_bytes
+        self.p2pb_mine, handle = ext.pg_p2pb_create(self.device, slot_bytes, rounds, bcast_bytes)
+        return handle
+
+
+    def p2pb_import(self, handles: dict):
+        """Map every other rank's mailbox; from here on prefill-size reduces go GPU to GPU"""
+        peers = [0] * (max(self.active_devices) + 1)
+        for d, h in handles.items():
+            if d != self.device:
+                peers[d] = ext.pg_p2p_open(self.device, h)
+        self.p2pb_peers = peers
+        self.p2pb = True
+        log_tp(self.device, f"P2P prefill-size reduce enabled")
+        return True
+
+
     def all_reduce(self, tensor: torch.Tensor, contribution: bool = True):
+        self.p2pb_bc_run = 0
+        if self.p2pb and ext.pg_p2pb_fits(tensor, self.p2pb_slot, self.p2pb_min):
+            ext.pg_all_reduce_p2p_big(
+                self.ptr_g,
+                self.dev_g,
+                self.active_devices,
+                self.device,
+                tensor,
+                contribution,
+                self.p2pb_mine,
+                self.p2pb_peers,
+                self.p2pb_slot,
+                self.abort_flag
+            )
+            return
+        if self.p2p and ext.pg_p2p_fits(tensor):
+            ext.pg_all_reduce_p2p(
+                self.ptr_g,
+                self.dev_g,
+                self.active_devices,
+                self.device,
+                tensor,
+                contribution,
+                self.p2p_mine,
+                self.p2p_peers,
+                self.abort_flag
+            )
+            return
         # if tensor.numel() * 2 < MAX_CPU_REDUCE:
         ext.pg_all_reduce_cpu(
             self.ptr_g,

@@ -1,4 +1,6 @@
 from __future__ import annotations
+from ..util import gtrace
+from ..util import cvec
 from typing import Callable
 import os
 import torch
@@ -339,6 +341,8 @@ class Model_LSMixin(ABC):
             params["prefill"] = pf
             x = module.prepare_for_device(x, params)
             x = module.forward(x, params)
+            if cvec.ACTIVE:
+                x = cvec.after_module(module, x, params)
             if pf:
                 break
         del params["prefill"]
@@ -352,11 +356,21 @@ class Model_LSMixin(ABC):
     ):
         for h in getattr(self.config, "moe_cpu_hosts", {}).values():
             h.begin_pass()
+        if gtrace.ENABLED:
+            gtrace.begin(x.numel() if x.dtype == torch.long else x.shape[0] * x.shape[1],
+                         f"ls.{getattr(self, 'component', 'text')}", self.fwd_modules[0][0].device)
         for module, instance, idx in self.fwd_modules:
             params["layer_instance"] = instance
             if module.caps.get("logits_output") and (num := params.get("last_tokens_only")):
                 x = x[..., -num:, :].contiguous()
             x = module.prepare_for_device(x, params)
             x = module.forward(x, params)
+            if cvec.ACTIVE:
+                x = cvec.after_module(module, x, params)
+            if gtrace.ENABLED:
+                gtrace.mark(type(module).__name__, module.device)
+        if gtrace.ENABLED:
+            gtrace.mark("_end")
+            gtrace.end()
         return x
 

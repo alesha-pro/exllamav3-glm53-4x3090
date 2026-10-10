@@ -1,3 +1,6 @@
+from ..util import gtrace
+from ..util import cvec
+from ..util import rtrace
 import torch
 import traceback
 import os
@@ -126,6 +129,22 @@ def mp_cpu_reduce(local_context: dict):
     backend.run_cpu_reduce_jobs()
 
 
+def mp_p2p_export(local_context: dict):
+    return local_context["backend"].p2p_export()
+
+
+def mp_p2p_import(local_context: dict, handles: dict):
+    return local_context["backend"].p2p_import(handles)
+
+
+def mp_p2pb_export(local_context: dict, slot_bytes: int, min_bytes: int, bcast_bytes: int):
+    return local_context["backend"].p2pb_export(slot_bytes, min_bytes, bcast_bytes)
+
+
+def mp_p2pb_import(local_context: dict, handles: dict):
+    return local_context["backend"].p2pb_import(handles)
+
+
 def mp_set_plan(local_context: dict, plan: dict, active_devices: list):
     """
     Used by TP loader, send (potentially large) plan dict once to avoid pickling with every message while loading
@@ -244,6 +263,11 @@ def mp_model_forward(
     ]:
         p = params.get(tensor_param)
         if p is not None:
+            if tensor_param == "cache_seqlens" and "_mla_host_seqlens" not in params:
+                # Host copy for the MLA layers' dense / sparse regime decision (mla_attn._host_seqlens):
+                # read from the shared staging before the device copy, or the first MLA layer of every
+                # pass reads it back from the device and stalls this rank's host on its stream
+                params["_mla_host_seqlens"] = consumer.recv(p).tolist()
             params[tensor_param] = consumer.recv(p, cuda = True)
 
     p = params.get("indexed_embeddings")
@@ -267,6 +291,11 @@ def mp_model_forward(
     if stream_hash:
         local_context["_hash_passes"] = local_context.get("_hash_passes", 0) + 1
 
+    trace = gtrace.ENABLED and not warmup and (not prefill or gtrace.PREFILL) and single_idx is None
+    if trace:
+        gtrace.begin(x.numel() if x.dtype == torch.long else x.shape[0] * x.shape[1],
+                     f"tp.dev{local_context['device']}.n{len(modules)}", local_context["device"])
+
     for idx, module in enumerate(modules):
         logits_layer = module.caps.get("logits_output")
         if logits_layer and (num := params.get("last_tokens_only")):
@@ -275,6 +304,12 @@ def mp_model_forward(
             params["prefill"] = (idx == last_kv_module_idx)
         x = module.prepare_for_device(x, params)
         x = module.forward(x, params)
+        if cvec.ACTIVE:
+            x = cvec.after_module(module, x, params)
+        if rtrace.ACTIVE and rtrace.LEADS:
+            rtrace.predict(modules, idx, x)
+        if trace:
+            gtrace.mark(type(module).__name__, local_context["device"])
         if stream_hash and x is not None:
             import hashlib
             h = hashlib.sha1(x.detach().contiguous().cpu().numpy().tobytes()).hexdigest()[:12]
@@ -282,9 +317,15 @@ def mp_model_forward(
         if prefill and idx == last_kv_module_idx:
             backend.end_cpu_reduce_jobs()
             del params["prefill"]
+            if trace:
+                gtrace.mark("_end", local_context["device"])
+                gtrace.end()
             return None
 
     backend.end_cpu_reduce_jobs()
+    if trace:
+        gtrace.mark("_end", local_context["device"])
+        gtrace.end()
     return x
 
 

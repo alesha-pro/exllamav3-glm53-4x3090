@@ -2,6 +2,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 import torch
 from ..util.device_copy import to_device
+from ..util import gtrace
 import os
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -91,10 +92,13 @@ class Module(ABC):
     tp_owner: int | None = None
 
     def tp_collect(self, backend, x: torch.Tensor, contribution: bool = True):
+        if gtrace.ENABLED: gtrace.mark(type(self).__name__ + ".compute")
         if self.tp_owner is not None:
             backend.broadcast(x, self.tp_owner)
+            if gtrace.ENABLED: gtrace.mark(type(self).__name__ + ".bcast")
         else:
             backend.all_reduce(x, contribution)
+            if gtrace.ENABLED: gtrace.mark(type(self).__name__ + ".reduce")
 
     @staticmethod
     def tp_single_owner(local_context: dict, *keys: str) -> int | None:

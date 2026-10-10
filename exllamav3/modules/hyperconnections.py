@@ -20,6 +20,10 @@ _gr_mix_tiled_enable = os.environ.get("EXL3_GR_MIX_TILED", "1") != "0"
 # finalize. Bit-identical to the unfused launches; EXL3_HC_FOLD selects (per-backend default in util/backend.py)
 _hc_fold = HC_FOLD
 _HC_FOLD_MAX_R = 32
+# The deferred apply_ under tensor parallelism: every rank holds its own replica of the streams and
+# walks the same module list, so the next reader of a site's streams is the next site's mix on the
+# same rank, exactly as in the single-process walk (EXL3_HC_FOLD_TP=0 keeps the eager update)
+_hc_fold_tp = os.environ.get("EXL3_HC_FOLD_TP", "1") != "0"
 
 
 def hc_flush(params: dict):
@@ -266,7 +270,8 @@ class HyperConnection(Module):
             R = b * s
             # ROCm, decode rows: hand the update to the next site's mix (mix_norm), which runs it inside its
             # partials kernel. Not while states are exported or under TP, where other readers see the streams
-            if _hc_fold and R <= _HC_FOLD_MAX_R and not params.get("export_state_layers") and "backend" not in params:
+            if _hc_fold and R <= _HC_FOLD_MAX_R and not params.get("export_state_layers") \
+                    and ("backend" not in params or _hc_fold_tp):
                 params["hc_pending"] = (x, y, post, comb)
                 return x
             ext.hc_apply(x.view(R, H, D), y.view(R, D), post.view(R, H), comb.view(R, H, H), None, None)

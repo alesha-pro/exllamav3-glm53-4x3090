@@ -469,6 +469,34 @@ class Model_TPMixin:
         self.active_devices = active_devices
         self.create_tp_context(tp_backend)
 
+        # Peer-to-peer collectives (EXL3_TP_P2P=1, native backend): every rank exports a mailbox in its
+        # device memory and maps the others'
+        if tp_backend == "native" and os.environ.get("EXL3_TP_P2P", "0") != "0" and len(self.active_devices) > 1:
+            handles = self.tp_worker_dispatch_wait_multi(self.active_devices, mp_p2p_export, ())
+            table = {d: h for d, h in zip(self.active_devices, handles)}
+            self.tp_worker_dispatch_wait_multi(self.active_devices, mp_p2p_import, (table,))
+            log_tp(None, "P2P collectives enabled")
+
+        # Peer-to-peer reduce for prefill-size payloads (EXL3_TP_P2P_BIG=1, native backend, 2 / 4 / 8 ranks):
+        # pairwise exchange between device memories instead of the CPU-assisted reduce. One slot holds the
+        # 16-bit wire image of the largest reduce (max_chunk_size rows of the hidden width by default,
+        # EXL3_TP_P2P_BIG_MB overrides); payloads below EXL3_TP_P2P_BIG_MIN_KB stay on the CPU path.
+        # Broadcasts of whole-module outputs take the same links (a region of two slots, the fp32 image);
+        # EXL3_TP_P2P_BIG_BCAST=0 keeps them on the host path and saves that memory
+        if tp_backend == "native" and os.environ.get("EXL3_TP_P2P_BIG", "0") != "0" and len(self.active_devices) in (2, 4, 8):
+            hidden = int(getattr(config, "hidden_size", 0) or 4096)
+            slot = int(float(os.environ.get("EXL3_TP_P2P_BIG_MB", "0")) * 2**20) or max_chunk_size * hidden * 2
+            slot = (slot + 4095) // 4096 * 4096
+            min_bytes = int(os.environ.get("EXL3_TP_P2P_BIG_MIN_KB", "1024")) * 1024
+            bcast = 2 * slot if os.environ.get("EXL3_TP_P2P_BIG_BCAST", "1") != "0" else 0
+            handles = self.tp_worker_dispatch_wait_multi(self.active_devices, mp_p2pb_export, (slot, min_bytes, bcast))
+            table = {d: h for d, h in zip(self.active_devices, handles)}
+            self.tp_worker_dispatch_wait_multi(self.active_devices, mp_p2pb_import, (table,))
+            rounds = len(self.active_devices).bit_length() - 1
+            print(f" -- P2P prefill reduce: {len(self.active_devices)} ranks, slot {slot / 2**20:.1f} MiB, "
+                  f"{(3 * rounds * slot + bcast) / 2**20:.0f} MiB of VRAM per rank"
+                  + ("" if bcast else ", broadcasts on the host path"))
+
         # Split model
         num_devices = max(self.active_devices) + 1
         max_mem = [0] * num_devices
