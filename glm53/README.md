@@ -97,7 +97,7 @@ hf download alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.4bpw-mix --local-dir glm
 hf download turboderp/GLM-5.3-Flash-exl3 --revision 3.05bpw --local-dir glm53/models/GLM-5.3-Flash-exl3-3.05bpw
 ```
 
-You need only the folder of the mode you run. My two repos carry the same weights plus the refusal vector: [2.05 bpw](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.05bpw) and [the mix](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.4bpw-mix).
+You need only the folder of the mode you run. My two repos carry the same weights plus the refusal vector in a `vector/` folder: [2.05 bpw](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.05bpw) and [the mix](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.4bpw-mix).
 
 ## Run
 
@@ -107,7 +107,7 @@ glm53/run_server.sh fast       # 2.05 bpw, 256K
 glm53/run_server.sh mix        # the mix, 256K
 glm53/run_server.sh quality    # 3.05 bpw, 131K
 
-VEC=glm53/models/GLM-5.3-Flash-exl3-2.4bpw-mix/glm53-refusal-per-block-3dir.safetensors glm53/run_server.sh mix
+VEC=glm53/models/GLM-5.3-Flash-exl3-2.4bpw-mix/vector/glm53-refusal-per-block-3dir.safetensors glm53/run_server.sh mix
 ```
 
 The server speaks the OpenAI API on port 30000, model id `glm-5.3-flash`. Loading takes 65 to 100 s for `fast`, about 150 s for `mix` and about 230 s for `quality` from NVMe.

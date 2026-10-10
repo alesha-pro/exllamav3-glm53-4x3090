@@ -8,7 +8,7 @@ x = x - scale * (x Vᵀ) V
 
 `V` holds the 3 orthonormal directions of the block, and the same operation runs on all 4 hyper-connection streams. Without `EXL3_CVEC` the engine runs the stock model.
 
-The vector file is `glm53-refusal-per-block-3dir.safetensors` (2.2 MB, blocks 1 to 44, SHA256 `f07b2cce3f91a36658c9706301088ba9c0140f3dc032cc26937136c1779f1764`). It is in my Hugging Face repos: [2.05 bpw](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.05bpw) and [the mix](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.4bpw-mix). A version for Project Maya is in the [Maya-M repo](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-Maya-M-GGUF).
+The vector file is `glm53-refusal-per-block-3dir.safetensors` (2.2 MB, blocks 1 to 44, SHA256 `f07b2cce3f91a36658c9706301088ba9c0140f3dc032cc26937136c1779f1764`). It is in the `vector/` folder of my Hugging Face repos: [2.05 bpw](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.05bpw) and [the mix](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-exl3-2.4bpw-mix). A version for Project Maya is in the [Maya-M repo](https://huggingface.co/alesha-pro/GLM-5.3-Flash-abliterated-Maya-M-GGUF).
 
 ```bash
 VEC=/path/to/glm53-refusal-per-block-3dir.safetensors glm53/run_server.sh fast
